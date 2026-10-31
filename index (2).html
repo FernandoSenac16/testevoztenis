@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teste de voz na quadra</title>
+<style>
+  :root { --bg:#f3f5f8; --ink:#14202e; --muted:#5d6b7c; --line:#d5dbe3; --court:#1b4f9c; --ok:#1d7a46; --bad:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; font-family:-apple-system, system-ui, "Helvetica Neue", sans-serif; background:var(--bg); color:var(--ink); max-width:520px; margin-inline:auto; line-height:1.4; }
+  h1 { font-size:1.3rem; margin:4px 0 12px; }
+  p, label, small { color:var(--muted); }
+  input[type=text] { width:100%; padding:10px; border:1px solid var(--line); border-radius:8px; font-size:1rem; margin:6px 0 14px; background:#fff; color:var(--ink); }
+  #talk { width:100%; height:76px; font-size:1.4rem; font-weight:600; border:0; border-radius:14px; background:var(--court); color:#fff; }
+  #talk:disabled { background:#7f9cc9; }
+  .box { background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px; margin:12px 0; }
+  #ask { font-size:1.25rem; font-weight:600; color:var(--ink); }
+  #heard { min-height:1.4em; font-size:1.05rem; }
+  #verdict { font-weight:600; min-height:1.4em; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { background:#e8edf4; border-radius:999px; padding:4px 10px; font-size:.95rem; color:var(--ink); }
+  button.sec { background:#fff; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:.95rem; }
+  #log { font-size:.85rem; color:var(--muted); white-space:pre-wrap; margin:0; }
+</style>
+</head>
+<body>
+<h1>Teste de comando de voz</h1>
+<p id="support"></p>
+
+<label for="ctx">Onde você está testando?</label>
+<input id="ctx" type="text" placeholder="ex.: quadra aberta, vento, celular a 3 m">
+
+<label><input id="guided" type="checkbox" checked> Teste guiado (o app pede cada comando)</label>
+<div class="box"><span id="ask">Toque em Falar e diga um comando.</span></div>
+
+<button id="talk">Falar</button>
+
+<div class="box">
+  <div id="heard"></div>
+  <div id="verdict"></div>
+</div>
+
+<div class="box">
+  <div>Acertos: <strong id="rate">0 de 0</strong> <small id="avg"></small></div>
+  <div class="row" id="counts" style="margin-top:8px"></div>
+</div>
+
+<div class="row">
+  <button class="sec" id="copy">Copiar resultados</button>
+  <button class="sec" id="reset">Zerar</button>
+</div>
+<div class="box"><pre id="log"></pre></div>
+
+<script>
+// Comandos e variações aceitas (sem acento, em minúsculas).
+// Se o celular escrever outra coisa, veja no log o que ele ouviu e acrescente aqui.
+const COMMANDS = {
+  "ponto meu":   ["ponto meu", "meu ponto", "ponto pra mim", "ponto para mim"],
+  "ponto dele":  ["ponto dele", "ponto dela", "ponto do adversario"],
+  "dupla falta": ["dupla falta"],
+  "ace":         ["ace", "eis"],
+  "winner":      ["winner", "vinner", "uiner"],
+  "erro":        ["erro"],
+  "desfazer":    ["desfazer", "voltar"]
+};
+
+const $ = id => document.getElementById(id);
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const norm = s => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  .replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+
+let expected = null, handled = false, heard = "", tFirst = 0, lastError = "", rec = null;
+const stats = { tries: 0, hits: 0, ms: [] };
+const counts = {}, hist = [], log = [];
+
+function match(text) {
+  const t = " " + norm(text) + " ";
+  for (const [cmd, aliases] of Object.entries(COMMANDS)) {
+    if (aliases.some(a => t.includes(" " + a + " "))) return cmd;
+  }
+  return null;
+}
+
+function pickNext() {
+  if (!$("guided").checked) { expected = null; $("ask").textContent = "Diga qualquer comando."; return; }
+  const keys = Object.keys(COMMANDS);
+  expected = keys[Math.floor(Math.random() * keys.length)];
+  $("ask").textContent = "Diga: “" + expected + "”";
+}
+
+function apply(cmd) {
+  if (cmd === "desfazer") { const last = hist.pop(); if (last) counts[last]--; return; }
+  counts[cmd] = (counts[cmd] || 0) + 1; hist.push(cmd);
+}
+
+function finish(cmd, ms) {
+  const ok = expected ? cmd === expected : !!cmd;
+  if (expected) { stats.tries++; if (ok) { stats.hits++; stats.ms.push(ms); } }
+  if (cmd) apply(cmd);
+  $("heard").textContent = "Ouvi: “" + (heard || "nada") + "”";
+  $("verdict").textContent = cmd ? (ok ? "Entendi: " + cmd : "Entendi: " + cmd + " (era outro)") : "Não entendi nenhum comando";
+  $("verdict").className = ok ? "ok" : "bad";
+  const hora = new Date().toLocaleTimeString("pt-BR");
+  log.unshift(hora + " | pedido: " + (expected || "-") + " | ouvido: “" + (heard || "nada") + "” | resultado: " + (cmd || "nada") + (ok ? " ✔" : " ✘"));
+  pickNext(); render();
+}
+
+function render() {
+  $("rate").textContent = stats.hits + " de " + stats.tries + (stats.tries ? " (" + Math.round(100 * stats.hits / stats.tries) + "%)" : "");
+  const avg = stats.ms.length ? Math.round(stats.ms.reduce((a, b) => a + b, 0) / stats.ms.length) : 0;
+  $("avg").textContent = avg ? " · tempo médio para entender: " + avg + " ms" : "";
+  $("counts").innerHTML = Object.entries(counts).filter(([, n]) => n > 0)
+    .map(([k, n]) => '<span class="chip">' + k + ": " + n + "</span>").join("");
+  $("log").textContent = log.slice(0, 25).join("\n");
+}
+
+function listen() {
+  if (!SR) return;
+  rec = new SR();
+  rec.lang = "pt-BR"; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+  handled = false; heard = ""; tFirst = 0; lastError = "";
+  $("talk").disabled = true; $("talk").textContent = "Escutando…";
+  $("heard").textContent = ""; $("verdict").textContent = "";
+
+  rec.onresult = e => {
+    if (!tFirst) tFirst = performance.now();
+    heard = Array.from(e.results).map(r => r[0].transcript).join(" ").trim();
+    $("heard").textContent = "Ouvindo: “" + heard + "”";
+    const cmd = match(heard);
+    if (cmd && !handled) {            // aceita já no resultado parcial, sem esperar a frase terminar
+      handled = true;
+      finish(cmd, performance.now() - tFirst);
+      try { rec.stop(); } catch (_) {}
+    }
+  };
+  rec.onerror = e => { lastError = e.error; };
+  rec.onend = () => {
+    $("talk").disabled = false; $("talk").textContent = "Falar";
+    if (handled) return;
+    if (lastError && lastError !== "no-speech") {   // erro técnico: não conta como tentativa
+      $("verdict").textContent = "Erro: " + lastError + ". Veja Ajustes > Siri e Ditado.";
+      $("verdict").className = "bad"; return;
+    }
+    handled = true; finish(null, 0);
+  };
+  try { rec.start(); } catch (err) { $("talk").disabled = false; $("talk").textContent = "Falar"; }
+}
+
+$("talk").onclick = listen;
+$("guided").onchange = pickNext;
+$("reset").onclick = () => { stats.tries = stats.hits = 0; stats.ms = []; hist.length = log.length = 0;
+  Object.keys(counts).forEach(k => delete counts[k]); pickNext(); render(); };
+$("copy").onclick = async () => {
+  const txt = "Contexto: " + ($("ctx").value || "-") + "\nAcertos: " + $("rate").textContent + $("avg").textContent + "\n\n" + log.join("\n");
+  try { await navigator.clipboard.writeText(txt); $("copy").textContent = "Copiado"; }
+  catch (_) { $("copy").textContent = "Não consegui copiar"; }
+  setTimeout(() => $("copy").textContent = "Copiar resultados", 1800);
+};
+
+$("support").textContent = SR
+  ? "Abra no Safari do iPhone. Se pedir, permita microfone e reconhecimento de voz."
+  : "Este navegador não tem reconhecimento de voz. Abra no Safari do iPhone.";
+if (!SR) $("talk").disabled = true;
+pickNext(); render();
+</script>
+</body>
+</html>
